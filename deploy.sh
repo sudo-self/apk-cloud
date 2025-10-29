@@ -9,27 +9,24 @@ REGION="us-central1"
 IMAGE_NAME="twa-builder"
 GCR_IMAGE="gcr.io/$PROJECT_ID/$SERVICE_NAME:latest"
 
-echo "=== Step 1: Building Docker image for AMD64 ==="
+echo "=== Building Docker image ==="
 docker build --platform linux/amd64 -t $IMAGE_NAME .
 
-echo "=== Step 2: APKs built 0: replies from deepseek 56 ==="
-
-
-echo "=== Step 3: Tagging for Google Container Registry ==="
+echo "=== Tagging for GCR ==="
 docker tag $IMAGE_NAME $GCR_IMAGE
 
-echo "=== Step 4: Pushing to GCR ==="
+echo "=== Pushing to GCR ==="
 docker push $GCR_IMAGE
 
-echo "=== Step 5: Deploying to Cloud Run ==="
+echo "=== Deploying to Cloud Run ==="
 gcloud run deploy $SERVICE_NAME \
   --image $GCR_IMAGE \
   --platform managed \
   --region $REGION \
   --allow-unauthenticated \
-  --timeout 15m \
-  --memory 2Gi \
-  --cpu 2
+  --timeout 300s \
+  --memory 512Mi \
+  --cpu 1
 
 echo "=== Deployment complete! ==="
 
