@@ -6,6 +6,11 @@ import shutil
 import uuid
 import requests
 import threading
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 BUILDS_DIR = "/app/builds"
@@ -83,24 +88,11 @@ HTML_TEMPLATE = """
             background: #666;
             cursor: not-allowed;
         }
-        .progress {
-            width: 100%;
-            height: 20px;
-            background: #333;
-            border-radius: 10px;
-            margin: 20px 0;
-            overflow: hidden;
-        }
-        .progress-bar {
-            height: 100%;
-            background: #4CAF50;
-            width: 0%;
-            transition: width 0.3s;
-        }
         .status {
             text-align: center;
-            margin: 10px 0;
+            margin: 20px 0;
             min-height: 24px;
+            color: #4CAF50;
         }
         .download-section {
             display: none;
@@ -126,6 +118,10 @@ HTML_TEMPLATE = """
             color: #f44336;
             text-align: center;
             margin: 10px 0;
+        }
+        .loading {
+            text-align: center;
+            color: #FF9800;
         }
     </style>
 </head>
@@ -153,10 +149,6 @@ HTML_TEMPLATE = """
             <button type="submit" id="buildBtn">BUILD APK</button>
         </form>
         
-        <div class="progress" id="progressBar" style="display: none;">
-            <div class="progress-bar" id="progressFill"></div>
-        </div>
-        
         <div class="status" id="status">Ready to build</div>
         <div class="error" id="error"></div>
         
@@ -172,15 +164,14 @@ HTML_TEMPLATE = """
             e.preventDefault();
             
             const buildBtn = document.getElementById('buildBtn');
-            const progressBar = document.getElementById('progressBar');
-            const progressFill = document.getElementById('progressFill');
             const status = document.getElementById('status');
             const error = document.getElementById('error');
             const downloadSection = document.getElementById('downloadSection');
             
             buildBtn.disabled = true;
             buildBtn.textContent = 'Building...';
-            progressBar.style.display = 'block';
+            status.textContent = 'Starting build process...';
+            status.className = 'loading';
             downloadSection.style.display = 'none';
             error.textContent = '';
             
@@ -197,13 +188,10 @@ HTML_TEMPLATE = """
                 const result = await response.json();
                 
                 if (response.ok) {
-                    status.textContent = 'Build completed!';
-                    progressFill.style.width = '100%';
+                    status.textContent = 'Build started! This may take 2-3 minutes...';
                     
-                    // Show download section
-                    const downloadLink = document.getElementById('downloadLink');
-                    downloadLink.href = `/download/${result.filename}`;
-                    downloadSection.style.display = 'block';
+                    // Poll for completion
+                    checkBuildStatus(result.build_id);
                 } else {
                     throw new Error(result.error || 'Build failed');
                 }
@@ -211,36 +199,61 @@ HTML_TEMPLATE = """
             } catch (err) {
                 error.textContent = err.message;
                 status.textContent = 'Build failed';
-            } finally {
+                status.className = 'error';
                 buildBtn.disabled = false;
                 buildBtn.textContent = 'BUILD APK';
             }
         });
-        
-        // Simulate progress updates
-        function updateProgress() {
-            const progressFill = document.getElementById('progressFill');
+
+        async function checkBuildStatus(buildId) {
             const status = document.getElementById('status');
-            const steps = [
-                'Creating project...',
-                'Downloading assets...', 
-                'Building APK...',
-                'Finalizing...'
-            ];
+            const error = document.getElementById('error');
+            const downloadSection = document.getElementById('downloadSection');
+            const buildBtn = document.getElementById('buildBtn');
             
-            let progress = 0;
-            steps.forEach((step, index) => {
-                setTimeout(() => {
-                    progress = ((index + 1) / steps.length) * 100;
-                    progressFill.style.width = progress + '%';
-                    status.textContent = step;
-                }, index * 2000);
-            });
+            try {
+                const response = await fetch(`/status/${buildId}`);
+                const result = await response.json();
+                
+                if (response.ok) {
+                    if (result.status === 'completed') {
+                        status.textContent = 'Build completed!';
+                        status.className = 'status';
+                        
+                        const downloadLink = document.getElementById('downloadLink');
+                        downloadLink.href = `/download/${result.filename}`;
+                        downloadSection.style.display = 'block';
+                        buildBtn.disabled = false;
+                        buildBtn.textContent = 'BUILD APK';
+                    } else if (result.status === 'failed') {
+                        error.textContent = result.error || 'Build failed';
+                        status.textContent = 'Build failed';
+                        status.className = 'error';
+                        buildBtn.disabled = false;
+                        buildBtn.textContent = 'BUILD APK';
+                    } else {
+                        // Still building, check again in 5 seconds
+                        status.textContent = result.message || 'Building...';
+                        setTimeout(() => checkBuildStatus(buildId), 5000);
+                    }
+                } else {
+                    throw new Error(result.error || 'Status check failed');
+                }
+            } catch (err) {
+                error.textContent = err.message;
+                status.textContent = 'Status check failed';
+                status.className = 'error';
+                buildBtn.disabled = false;
+                buildBtn.textContent = 'BUILD APK';
+            }
         }
     </script>
 </body>
 </html>
 """
+
+# Store build status
+build_status = {}
 
 @app.route('/')
 def index():
@@ -260,32 +273,49 @@ def build_apk():
         if not url.startswith(('http://', 'https://')):
             url = 'https://' + url
         
-        # Generate unique filename
+        # Generate unique build ID
         build_id = str(uuid.uuid4())[:8]
-        apk_filename = f"{app_name.replace(' ', '_')}_{build_id}.apk"
+        apk_filename = f"{app_name.replace(' ', '_')}.apk"
         apk_path = os.path.join(BUILDS_DIR, apk_filename)
+        
+        # Initialize build status
+        build_status[build_id] = {
+            'status': 'building',
+            'message': 'Build started',
+            'filename': apk_filename,
+            'error': None
+        }
         
         # Build in background thread
         thread = threading.Thread(
             target=build_apk_thread,
-            args=(url, app_name, icon_url, apk_path),
+            args=(url, app_name, icon_url, apk_path, build_id),
             daemon=True
         )
         thread.start()
         
         return jsonify({
             'message': 'Build started',
-            'filename': apk_filename,
             'build_id': build_id
         })
         
     except Exception as e:
+        logger.error(f"Build error: {e}")
         return jsonify({'error': str(e)}), 500
 
-def build_apk_thread(url: str, app_name: str, icon_url: str, apk_path: str):
+@app.route('/status/<build_id>')
+def get_build_status(build_id):
+    status = build_status.get(build_id, {'status': 'unknown'})
+    return jsonify(status)
+
+def build_apk_thread(url: str, app_name: str, icon_url: str, apk_path: str, build_id: str):
     """Build APK in background thread"""
     try:
+        build_status[build_id]['message'] = 'Creating project structure...'
+        
         with tempfile.TemporaryDirectory() as temp_dir:
+            logger.info(f"Building APK in {temp_dir}")
+            
             # Generate main.py
             main_py_content = f'''import flet as ft
 
@@ -312,6 +342,7 @@ ft.app(main)
             
             # Download icon if provided
             if icon_url:
+                build_status[build_id]['message'] = 'Downloading icon...'
                 try:
                     response = requests.get(icon_url, timeout=30)
                     if response.status_code == 200:
@@ -319,31 +350,60 @@ ft.app(main)
                         os.makedirs(assets_dir, exist_ok=True)
                         with open(os.path.join(assets_dir, "icon.png"), 'wb') as f:
                             f.write(response.content)
+                        logger.info("Icon downloaded successfully")
                 except Exception as e:
-                    print(f"Icon download failed: {e}")
+                    logger.warning(f"Icon download failed: {e}")
             
             # Build APK
+            build_status[build_id]['message'] = 'Building APK with Flutter...'
+            original_dir = os.getcwd()
             os.chdir(temp_dir)
-            result = subprocess.run(
-                ['flet', 'build', 'apk', '--name', app_name],
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
             
-            if result.returncode == 0:
-                # Find and copy APK
-                apk_source = find_apk_file(temp_dir)
-                if apk_source:
-                    shutil.copy2(apk_source, apk_path)
-                    print(f"APK built successfully: {apk_path}")
+            try:
+                logger.info("Starting APK build...")
+                result = subprocess.run(
+                    ['flet', 'build', 'apk', '--name', app_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                
+                if result.returncode == 0:
+                    logger.info("APK build completed successfully")
+                    # Find and copy APK
+                    apk_source = find_apk_file(temp_dir)
+                    if apk_source:
+                        shutil.copy2(apk_source, apk_path)
+                        logger.info(f"APK copied to: {apk_path}")
+                        build_status[build_id].update({
+                            'status': 'completed',
+                            'message': 'Build completed successfully'
+                        })
+                    else:
+                        error_msg = "APK file not found after build"
+                        logger.error(error_msg)
+                        build_status[build_id].update({
+                            'status': 'failed',
+                            'error': error_msg
+                        })
                 else:
-                    print("APK file not found after build")
-            else:
-                print(f"Build failed: {result.stderr}")
+                    error_msg = f"Build failed: {result.stderr}"
+                    logger.error(error_msg)
+                    build_status[build_id].update({
+                        'status': 'failed',
+                        'error': error_msg
+                    })
+                    
+            finally:
+                os.chdir(original_dir)
                 
     except Exception as e:
-        print(f"Build error: {e}")
+        error_msg = f"Build error: {str(e)}"
+        logger.error(error_msg)
+        build_status[build_id].update({
+            'status': 'failed',
+            'error': error_msg
+        })
 
 def find_apk_file(directory: str):
     """Find the built APK file"""
@@ -362,4 +422,5 @@ def download_file(filename):
     return "File not found", 404
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=False)
